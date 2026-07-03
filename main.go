@@ -36,6 +36,8 @@ func main() {
 	switch os.Args[1] {
 	case "new":
 		cmdNew(os.Args[2:])
+	case "update":
+		cmdUpdate(os.Args[2:])
 	case "list-langs":
 		cmdLangs()
 	case "version", "-v", "--version":
@@ -54,6 +56,7 @@ func usage() {
 
 Usage:
   ainpt new <name> [--lang go] [--dir .] [--ref <branch>] [--set KEY=VALUE]
+  ainpt update [--dir .]
   ainpt list-langs
   ainpt version
 
@@ -62,6 +65,9 @@ Flags for "new":
   --dir    parent directory for the new project (default ".")
   --ref    branch override (default: main, or lang/<lang> when --lang is set)
   --set    set a template variable, repeatable (e.g. --set MODULE_PATH=example.com/x)
+
+"update" 3-way merges later template changes into an existing project (using the
+.ainpt.json written at creation). Resolve any conflict markers, then commit.
 
 Environment:
   AINPT_OWNER, AINPT_REPO   override the template source repository
@@ -109,6 +115,16 @@ func cmdNew(args []string) {
 		Sets:  sets,
 	})
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func cmdUpdate(args []string) {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	dir := fs.String("dir", ".", "project directory to update")
+	_ = fs.Parse(args)
+	if err := scaffold.Update(*dir); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

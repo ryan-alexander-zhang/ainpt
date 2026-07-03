@@ -17,9 +17,25 @@ and installs it to `/usr/local/bin` (or `~/.local/bin`).
 ```bash
 ainpt new my-project            # base template (main branch)
 ainpt new my-service --lang go  # Go-flavored template (lang/go branch)
+ainpt update                    # pull later template changes into this project
 ainpt list-langs                # show available language templates
 ainpt version
 ```
+
+## Updating a project
+
+`ainpt new` records where the project came from in `.ainpt.json` (template repo,
+ref, and the exact commit). Later, from inside the project:
+
+```bash
+ainpt update            # or: ainpt update --dir path/to/project
+```
+
+`update` fetches the template at the recorded commit (the base) and at the latest
+ref, then does a per-file **3-way merge**: your local edits are kept, the upstream
+delta is folded in, and any overlap is left as normal `<<<<<<<` conflict markers.
+Only template-managed files are touched — your own files are never modified.
+Resolve any conflicts and commit. (Requires `git` on PATH for the merge.)
 
 Flags for `new`:
 

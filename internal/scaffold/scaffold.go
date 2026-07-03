@@ -47,7 +47,7 @@ type manifest struct {
 func Run(o Options) error {
 	ref := resolveRef(o)
 	fmt.Printf("Fetching %s/%s@%s ...\n", o.Owner, o.Repo, ref)
-	src, err := fetch(o.Owner, o.Repo, ref)
+	src, err := fetch(o.Owner, o.Repo, "refs/heads/"+ref)
 	if err != nil {
 		return err
 	}
@@ -75,6 +75,8 @@ func Run(o Options) error {
 		return err
 	}
 
+	writeLock(target, o, ref, vars)
+
 	fmt.Printf("\nCreated %s\n", target)
 	return nil
 }
@@ -92,8 +94,8 @@ func resolveRef(o Options) string {
 
 // fetch downloads and extracts the branch tarball into a temp dir, stripping
 // the top-level "<repo>-<ref>/" wrapper that GitHub adds. Returns the temp root.
-func fetch(owner, repo, ref string) (string, error) {
-	url := fmt.Sprintf("https://codeload.github.com/%s/%s/tar.gz/refs/heads/%s", owner, repo, ref)
+func fetch(owner, repo, refPath string) (string, error) {
+	url := fmt.Sprintf("https://codeload.github.com/%s/%s/tar.gz/%s", owner, repo, refPath)
 	resp, err := http.Get(url)
 	if err != nil {
 		return "", err
@@ -277,4 +279,178 @@ func runSteps(dir string, steps []step, vars map[string]string, lang string) err
 		}
 	}
 	return nil
+}
+
+// Lock records where a project came from so `ainpt update` can 3-way merge
+// later template changes. Written as .ainpt.json in the project root.
+type Lock struct {
+	Template string            `json:"template"`
+	Ref      string            `json:"ref"`
+	Commit   string            `json:"commit"`
+	Vars     map[string]string `json:"vars,omitempty"`
+}
+
+func writeLock(target string, o Options, ref string, vars map[string]string) {
+	sha, err := resolveSHA(o.Owner, o.Repo, ref)
+	if err != nil {
+		fmt.Println("  warning: could not record template commit; `ainpt update` will need it set manually")
+	}
+	v := map[string]string{}
+	for k, val := range vars {
+		if k == "name" {
+			continue
+		}
+		v[k] = val
+	}
+	lock := Lock{Template: o.Owner + "/" + o.Repo, Ref: ref, Commit: sha, Vars: v}
+	b, _ := json.MarshalIndent(lock, "", "  ")
+	_ = os.WriteFile(filepath.Join(target, ".ainpt.json"), append(b, '\n'), 0o644)
+}
+
+func resolveSHA(owner, repo, ref string) (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", owner, repo, ref)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github.sha")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("resolve sha for %s: %s", ref, resp.Status)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// Update 3-way merges upstream template changes into an existing project.
+func Update(dir string) error {
+	if dir == "" {
+		dir = "."
+	}
+	lb, err := os.ReadFile(filepath.Join(dir, ".ainpt.json"))
+	if err != nil {
+		return fmt.Errorf("no .ainpt.json in %q — was this project created by ainpt?", dir)
+	}
+	var lock Lock
+	if err := json.Unmarshal(lb, &lock); err != nil {
+		return fmt.Errorf("parse .ainpt.json: %w", err)
+	}
+	if lock.Commit == "" {
+		return fmt.Errorf(".ainpt.json has no base commit; cannot 3-way merge")
+	}
+	parts := strings.SplitN(lock.Template, "/", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid template %q in .ainpt.json", lock.Template)
+	}
+	owner, repo := parts[0], parts[1]
+
+	newSHA, err := resolveSHA(owner, repo, lock.Ref)
+	if err != nil {
+		return err
+	}
+	if newSHA == lock.Commit {
+		fmt.Println("Already up to date.")
+		return nil
+	}
+	fmt.Printf("Updating %s@%s: %s -> %s\n", lock.Template, lock.Ref, short(lock.Commit), short(newSHA))
+
+	oldSrc, err := fetch(owner, repo, lock.Commit)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(oldSrc)
+	newSrc, err := fetch(owner, repo, "refs/heads/"+lock.Ref)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(newSrc)
+
+	m := loadManifest(newSrc)
+
+	var added, merged int
+	var conflicts []string
+
+	err = filepath.Walk(newSrc, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(newSrc, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." || info.IsDir() {
+			return nil
+		}
+		if excluded(rel, m.Exclude) {
+			return nil
+		}
+		mine := filepath.Join(dir, rel)
+		if _, err := os.Stat(mine); os.IsNotExist(err) {
+			// New upstream file — add it verbatim.
+			if err := os.MkdirAll(filepath.Dir(mine), 0o755); err != nil {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(mine, data, info.Mode()); err != nil {
+				return err
+			}
+			added++
+			return nil
+		}
+		base := filepath.Join(oldSrc, rel)
+		if _, err := os.Stat(base); os.IsNotExist(err) {
+			base = os.DevNull
+		}
+		// In-place 3-way merge: keep local edits, fold in the upstream delta.
+		c := exec.Command("git", "merge-file",
+			"-L", "yours", "-L", "template (old)", "-L", "template (new)",
+			mine, base, path)
+		c.Stderr = os.Stderr
+		if err := c.Run(); err != nil {
+			if _, ok := err.(*exec.ExitError); ok {
+				conflicts = append(conflicts, rel)
+			} else {
+				return fmt.Errorf("merge %s: %w", rel, err)
+			}
+		}
+		merged++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	lock.Commit = newSHA
+	if b, err := json.MarshalIndent(lock, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, ".ainpt.json"), append(b, '\n'), 0o644)
+	}
+
+	fmt.Printf("\nMerged %d file(s), added %d new file(s).\n", merged, added)
+	if len(conflicts) > 0 {
+		fmt.Printf("%d file(s) have conflicts to resolve:\n", len(conflicts))
+		for _, c := range conflicts {
+			fmt.Printf("  %s\n", c)
+		}
+		fmt.Println("Resolve the <<<<<<< markers, then commit.")
+	} else {
+		fmt.Println("No conflicts. Review the diff and commit.")
+	}
+	return nil
+}
+
+func short(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
