@@ -212,6 +212,9 @@ func excluded(rel string, patterns []string) bool {
 		if rel == p || strings.HasPrefix(rel, p+"/") {
 			return true
 		}
+		if ok, _ := filepath.Match(p, rel); ok {
+			return true
+		}
 	}
 	return false
 }
