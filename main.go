@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/ryan-alexander-zhang/ainpt/internal/scaffold"
@@ -55,16 +56,17 @@ func usage() {
 	fmt.Print(`ainpt — scaffold a project from the ai-native-project-template
 
 Usage:
-  ainpt new <name> [--lang go] [--dir .] [--ref <branch>] [--set KEY=VALUE]
+  ainpt new <name> [--lang go] [--variant ddd] [--dir .] [--ref <branch>] [--set KEY=VALUE]
   ainpt update [--dir .]
   ainpt list-langs
   ainpt version
 
 Flags for "new":
-  --lang   language branch to use (lang/<lang>); empty uses the base template (main)
-  --dir    parent directory for the new project (default ".")
-  --ref    branch override (default: main, or lang/<lang> when --lang is set)
-  --set    set a template variable, repeatable (e.g. --set MODULE_PATH=example.com/x)
+  --lang     language branch to use (lang/<lang>); empty uses the base template (main)
+  --variant  variant under a language (lang/<lang>/<variant>); requires --lang
+  --dir      parent directory for the new project (default ".")
+  --ref      branch override (default: main, lang/<lang>, or lang/<lang>/<variant>)
+  --set      set a template variable, repeatable (e.g. --set MODULE_PATH=example.com/x)
 
 "update" 3-way merges later template changes into an existing project (using the
 .ainpt.json written at creation). Resolve any conflict markers, then commit.
@@ -89,6 +91,7 @@ func (s setFlag) Set(v string) error {
 func cmdNew(args []string) {
 	fs := flag.NewFlagSet("new", flag.ExitOnError)
 	lang := fs.String("lang", "", "language branch (lang/<lang>); empty = base template")
+	variant := fs.String("variant", "", "variant under a language (lang/<lang>/<variant>)")
 	dir := fs.String("dir", ".", "parent directory for the new project")
 	ref := fs.String("ref", "", "branch override (default: main or lang/<lang>)")
 	sets := setFlag{}
@@ -99,20 +102,26 @@ func cmdNew(args []string) {
 	_ = fs.Parse(args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: ainpt new <name> [--lang go] [--dir .] [--set K=V]")
+		fmt.Fprintln(os.Stderr, "usage: ainpt new <name> [--lang go] [--variant ddd] [--dir .] [--set K=V]")
 		os.Exit(1)
 	}
 	name := rest[0]
 	_ = fs.Parse(rest[1:])
 
+	if *variant != "" && *lang == "" {
+		fmt.Fprintln(os.Stderr, "error: --variant requires --lang (e.g. --lang java --variant ddd)")
+		os.Exit(1)
+	}
+
 	err := scaffold.Run(scaffold.Options{
-		Name:  name,
-		Lang:  *lang,
-		Dir:   *dir,
-		Ref:   *ref,
-		Owner: owner,
-		Repo:  repo,
-		Sets:  sets,
+		Name:    name,
+		Lang:    *lang,
+		Variant: *variant,
+		Dir:     *dir,
+		Ref:     *ref,
+		Owner:   owner,
+		Repo:    repo,
+		Sets:    sets,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -149,16 +158,43 @@ func cmdLangs() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	fmt.Println("Available templates:")
-	fmt.Println("  (default)   base template (main)")
-	found := false
+	// Group lang/<lang> and lang/<lang>/<variant> branches under each language.
+	type langInfo struct {
+		hasBase  bool
+		variants []string
+	}
+	langs := map[string]*langInfo{}
+	var order []string
 	for _, b := range branches {
-		if strings.HasPrefix(b.Name, "lang/") {
-			fmt.Printf("  --lang %s\n", strings.TrimPrefix(b.Name, "lang/"))
-			found = true
+		if !strings.HasPrefix(b.Name, "lang/") {
+			continue
+		}
+		parts := strings.SplitN(strings.TrimPrefix(b.Name, "lang/"), "/", 2)
+		l := parts[0]
+		if _, ok := langs[l]; !ok {
+			langs[l] = &langInfo{}
+			order = append(order, l)
+		}
+		if len(parts) == 1 {
+			langs[l].hasBase = true
+		} else {
+			langs[l].variants = append(langs[l].variants, parts[1])
 		}
 	}
-	if !found {
+	sort.Strings(order)
+
+	fmt.Println("Available templates:")
+	fmt.Println("  (default)              base template (main)")
+	if len(order) == 0 {
 		fmt.Println("  (no lang/* branches yet — only the base template is available)")
+		return
+	}
+	for _, l := range order {
+		info := langs[l]
+		fmt.Printf("  --lang %-15s lang/%s\n", l, l)
+		sort.Strings(info.variants)
+		for _, v := range info.variants {
+			fmt.Printf("    --variant %-10s lang/%s/%s\n", v, l, v)
+		}
 	}
 }

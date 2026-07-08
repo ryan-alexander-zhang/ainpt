@@ -16,24 +16,27 @@ import (
 
 // Options controls a single scaffold run.
 type Options struct {
-	Name  string
-	Lang  string
-	Dir   string
-	Ref   string
-	Owner string
-	Repo  string
-	Sets  map[string]string
+	Name    string
+	Lang    string
+	Variant string
+	Dir     string
+	Ref     string
+	Owner   string
+	Repo    string
+	Sets    map[string]string
 }
 
 type varSpec struct {
-	Prompt   string `json:"prompt"`
-	Default  string `json:"default"`
-	WhenLang string `json:"when_lang"`
+	Prompt      string `json:"prompt"`
+	Default     string `json:"default"`
+	WhenLang    string `json:"when_lang"`
+	WhenVariant string `json:"when_variant"`
 }
 
 type step struct {
-	Cmd      string `json:"cmd"`
-	WhenLang string `json:"when_lang"`
+	Cmd         string `json:"cmd"`
+	WhenLang    string `json:"when_lang"`
+	WhenVariant string `json:"when_variant"`
 }
 
 type manifest struct {
@@ -49,7 +52,7 @@ func Run(o Options) error {
 	fmt.Printf("Fetching %s/%s@%s ...\n", o.Owner, o.Repo, ref)
 	src, err := fetch(o.Owner, o.Repo, "refs/heads/"+ref)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w\n(run `ainpt list-langs` to see available templates)", err)
 	}
 	defer os.RemoveAll(src)
 
@@ -71,7 +74,7 @@ func Run(o Options) error {
 	if err := substitute(target, m.Substitute, vars); err != nil {
 		return err
 	}
-	if err := runSteps(target, m.PostCreate, vars, o.Lang); err != nil {
+	if err := runSteps(target, m.PostCreate, vars, o.Lang, o.Variant); err != nil {
 		return err
 	}
 
@@ -85,6 +88,8 @@ func resolveRef(o Options) string {
 	switch {
 	case o.Ref != "":
 		return o.Ref
+	case o.Lang != "" && o.Variant != "":
+		return "lang/" + o.Lang + "/" + o.Variant
 	case o.Lang != "":
 		return "lang/" + o.Lang
 	default:
@@ -183,6 +188,9 @@ func resolveVars(m manifest, o Options) (map[string]string, error) {
 		if spec.WhenLang != "" && spec.WhenLang != o.Lang {
 			continue
 		}
+		if spec.WhenVariant != "" && spec.WhenVariant != o.Variant {
+			continue
+		}
 		if _, ok := vars[key]; ok {
 			continue
 		}
@@ -266,9 +274,12 @@ func substitute(root string, files []string, vars map[string]string) error {
 	return nil
 }
 
-func runSteps(dir string, steps []step, vars map[string]string, lang string) error {
+func runSteps(dir string, steps []step, vars map[string]string, lang, variant string) error {
 	for _, s := range steps {
 		if s.WhenLang != "" && s.WhenLang != lang {
+			continue
+		}
+		if s.WhenVariant != "" && s.WhenVariant != variant {
 			continue
 		}
 		cmd := expand(s.Cmd, vars)
@@ -289,6 +300,8 @@ func runSteps(dir string, steps []step, vars map[string]string, lang string) err
 type Lock struct {
 	Template string            `json:"template"`
 	Ref      string            `json:"ref"`
+	Lang     string            `json:"lang,omitempty"`
+	Variant  string            `json:"variant,omitempty"`
 	Commit   string            `json:"commit"`
 	Vars     map[string]string `json:"vars,omitempty"`
 }
@@ -305,7 +318,7 @@ func writeLock(target string, o Options, ref string, vars map[string]string) {
 		}
 		v[k] = val
 	}
-	lock := Lock{Template: o.Owner + "/" + o.Repo, Ref: ref, Commit: sha, Vars: v}
+	lock := Lock{Template: o.Owner + "/" + o.Repo, Ref: ref, Lang: o.Lang, Variant: o.Variant, Commit: sha, Vars: v}
 	b, _ := json.MarshalIndent(lock, "", "  ")
 	_ = os.WriteFile(filepath.Join(target, ".ainpt.json"), append(b, '\n'), 0o644)
 }
